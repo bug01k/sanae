@@ -1,0 +1,1619 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>초성 왕국 어린이 멀티플레이 게임</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PeerJS for WebRTC -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gaegu:wght@700&family=Gowun+Dodum&family=Noto+Sans+KR:wght@400;600;800;900&display=swap">
+
+    <style>
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            background: linear-gradient(135deg, #2e1065 0%, #4c1d95 40%, #701a75 100%);
+            min-height: 100vh;
+            color: #f8fafc;
+        }
+        .font-gaegu { font-family: 'Gaegu', cursive; }
+        .font-gowun { font-family: 'Gowun Dodum', sans-serif; }
+        .glass-panel {
+            background: rgba(30, 27, 75, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        .glass-card {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(244, 114, 182, 0.4); }
+            50% { box-shadow: 0 0 40px rgba(244, 114, 182, 0.8); }
+        }
+        .active-turn-card { animation: pulse-glow 2s infinite; }
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-8px); }
+        }
+        .float-anim { animation: float 3s ease-in-out infinite; }
+        
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.5); }
+        ::-webkit-scrollbar-thumb { background: rgba(168, 85, 247, 0.5); border-radius: 3px; }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen overflow-x-hidden select-none">
+
+    <script>
+        class SoundEngine {
+            constructor() {
+                this.ctx = null;
+            }
+            init() {
+                if (!this.ctx) {
+                    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (this.ctx.state === 'suspended') this.ctx.resume();
+            }
+            tone(type, freq, t, dur, vol, dest) {
+                const osc = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, t);
+                g.gain.setValueAtTime(vol, t);
+                g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+                osc.connect(g);
+                g.connect(dest || this.ctx.destination);
+                osc.start(t);
+                osc.stop(t + dur + 0.02);
+            }
+            playClick() {
+                if (!this.ctx) return;
+                const t = this.ctx.currentTime;
+                this.tone('square', 880, t, 0.04, 0.12);
+                this.tone('square', 1320, t + 0.04, 0.07, 0.12);
+            }
+            startBGM() {
+                if (!this.ctx || this.bgmTimer || this.bgmOn === false) return;
+                if (!this.bgmGain) {
+                    this.bgmGain = this.ctx.createGain();
+                    this.bgmGain.gain.value = 0.5;
+                    this.bgmGain.connect(this.ctx.destination);
+                }
+                const hz = n => 440 * Math.pow(2, (n - 69) / 12);
+                const lead = [76,79,84,79,76,79,72,0, 76,81,84,81,76,81,69,0, 77,81,84,81,77,81,72,0, 74,79,83,79,74,79,71,0];
+                const bass = [48, 45, 41, 43];
+                const step = 0.2;
+                let i = 0, next = this.ctx.currentTime + 0.1;
+                this.bgmTimer = setInterval(() => {
+                    while (next < this.ctx.currentTime + 1.2) {
+                        const idx = i % 32, bar = Math.floor(idx / 8), pos = idx % 8;
+                        if (lead[idx]) this.tone('square', hz(lead[idx]), next, step * 0.9, 0.05, this.bgmGain);
+                        const root = bass[bar];
+                        const b = [root, 0, root + 12, 0, root, 0, root + 7, 0][pos];
+                        if (b) this.tone('triangle', hz(b), next, step * 0.9, 0.12, this.bgmGain);
+                        next += step; i++;
+                    }
+                }, 100);
+            }
+            stopBGM() {
+                clearInterval(this.bgmTimer);
+                this.bgmTimer = null;
+            }
+            toggleBGM() {
+                this.bgmOn = (this.bgmOn === false);
+                if (this.bgmOn) this.startBGM(); else this.stopBGM();
+                return this.bgmOn;
+            }
+            playPop() { /* 버튼 효과음은 전역 클릭 리스너가 처리 */ }
+            playSuccess() { // 도로롱~
+                if (!this.ctx) return;
+                const t = this.ctx.currentTime;
+                const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5, 1568, 1318.5, 1568, 2093];
+                notes.forEach((f, i) => this.tone('square', f, t + i * 0.05, i === notes.length - 1 ? 0.35 : 0.06, 0.12));
+            }
+            playLevelUp() {
+                if (!this.ctx) return;
+                const now = this.ctx.currentTime;
+                const notes = [440, 554.37, 659.25, 880, 1108.73];
+                notes.forEach((freq, idx) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+                    gain.gain.setValueAtTime(0.25, now + idx * 0.08);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.08 + 0.25);
+                    osc.connect(gain);
+                    gain.connect(this.ctx.destination);
+                    osc.start(now + idx * 0.08);
+                    osc.stop(now + idx * 0.08 + 0.25);
+                });
+            }
+            playFail() {
+                if (!this.ctx) return;
+                const now = this.ctx.currentTime;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(200, now);
+                osc.frequency.exponentialRampToValueAtTime(100, now + 0.3);
+                gain.gain.setValueAtTime(0.25, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            }
+            playTick() {
+                if (!this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(1000, this.ctx.currentTime);
+                gain.gain.setValueAtTime(0.05, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.03);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.03);
+            }
+            playHint() {
+                if (!this.ctx) return;
+                const now = this.ctx.currentTime;
+                [783.99, 880, 987.77].forEach((freq, idx) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(freq, now + idx * 0.05);
+                    gain.gain.setValueAtTime(0.15, now + idx * 0.05);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.05 + 0.1);
+                    osc.connect(gain);
+                    gain.connect(this.ctx.destination);
+                    osc.start(now + idx * 0.05);
+                    osc.stop(now + idx * 0.05 + 0.1);
+                });
+            }
+        }
+        const audio = new SoundEngine();
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('button')) return;
+            audio.init();
+            audio.playClick();
+            audio.startBGM();
+            if (typeof unlockTTS === 'function') unlockTTS();
+            if (typeof requestWake === 'function') requestWake();
+        }, true);
+    </script>
+
+    <header class="w-full py-3 px-6 flex justify-between items-center glass-panel z-10 sticky top-0 shadow-lg">
+        <div class="flex items-center space-x-3 cursor-pointer" onclick="location.reload()">
+            <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-yellow-400 to-pink-500 flex items-center justify-center text-white text-2xl font-black shadow-lg">
+                초
+            </div>
+            <div>
+                <h1 class="text-xl font-black tracking-wider text-amber-300 font-gaegu text-2xl">
+                    초성 왕국 <span class="text-xs font-sans text-pink-300 bg-pink-900/60 px-2 py-0.5 rounded-full border border-pink-500/30">어린이 멀티 대전</span>
+                </h1>
+                <p class="text-[11px] text-purple-200">어휘력 향상 초성 대전 게임</p>
+            </div>
+        </div>
+
+        <div class="flex items-center space-x-3">
+            <span id="p2p-status-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800/80 text-slate-300 border border-slate-700 flex items-center gap-2">
+                <span id="p2p-dot" class="w-2 h-2 rounded-full bg-slate-400"></span>
+                <span id="p2p-status-text">오프라인</span>
+            </span>
+            <button onclick="toggleBGM()" class="p-2 rounded-xl bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-500/30 transition" title="배경음악 켜기/끄기">
+                <i id="bgm-icon" class="fa-solid fa-music text-base"></i>
+            </button>
+            <button onclick="toggleTTS()" class="p-2 rounded-xl bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-500/30 transition" title="문제 읽어주기 켜기/끄기">
+                <i id="tts-icon" class="fa-solid fa-comment-dots text-base"></i>
+            </button>
+            <button onclick="toggleModal('rules-modal')" class="p-2 rounded-xl bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-500/30 transition" title="도움말">
+                <i class="fa-solid fa-graduation-cap text-base"></i>
+            </button>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-5xl w-full mx-auto p-4 md:p-6 flex flex-col justify-center">
+
+        <div id="view-lobby" class="flex flex-col items-center justify-center space-y-8 py-4">
+            <div class="text-center space-y-3 float-anim">
+                <span class="px-4 py-1.5 rounded-full text-xs font-bold bg-amber-400/20 text-amber-300 border border-amber-400/30">
+                    ✨ 함께 공부하고 대결하는 초성 왕국!
+                </span>
+                <h2 class="text-4xl md:text-5xl font-black text-white font-gaegu tracking-wide">
+                    재미있고 유익한 초성 낱말 대전
+                </h2>
+                <p class="text-purple-200 text-sm md:text-base max-w-lg mx-auto">
+                    막히면 첫 글자 힌트를 쓰고, 포기해도 정답 단어를 보여줍니다!
+                </p>
+            </div>
+
+            <div class="w-full max-w-md glass-panel p-6 rounded-3xl shadow-2xl space-y-5 border border-purple-400/20">
+                <div>
+                    <label class="block text-xs font-bold text-amber-300 uppercase tracking-wider mb-2">플레이어 닉네임</label>
+                    <div class="relative">
+                        <i class="fa-solid fa-face-smile absolute left-4 top-3.5 text-purple-300"></i>
+                        <input type="text" id="player-nickname" maxlength="10" placeholder="닉네임을 입력하세요"
+                            class="w-full pl-11 pr-4 py-3 bg-purple-950/80 border border-purple-500/40 rounded-2xl focus:ring-2 focus:ring-amber-400 focus:outline-none text-white font-bold">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <button onclick="startSinglePlayer()" class="w-full py-3.5 px-4 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-bold rounded-2xl shadow-lg transition flex items-center justify-center gap-2 group">
+                        <i class="fa-solid fa-gamepad group-hover:scale-110 transition-transform"></i>
+                        혼자서 연습하기
+                    </button>
+                    <button onclick="openCreateRoomModal()" class="w-full py-3.5 px-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white font-bold rounded-2xl shadow-lg transition flex items-center justify-center gap-2 group">
+                        <i class="fa-solid fa-users group-hover:scale-110 transition-transform"></i>
+                        멀티 방 만들기
+                    </button>
+                </div>
+
+                <div class="relative flex py-1 items-center">
+                    <div class="flex-grow border-t border-purple-500/30"></div>
+                    <span class="flex-shrink mx-4 text-xs font-semibold text-purple-300">또는</span>
+                    <div class="flex-grow border-t border-purple-500/30"></div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-purple-200 uppercase tracking-wider mb-2">방 코드로 참가하기</label>
+                    <div class="flex space-x-2">
+                        <input type="text" id="join-room-code" placeholder="예: A1B2C3"
+                            class="flex-1 px-4 py-3 bg-purple-950/80 border border-purple-500/40 rounded-2xl focus:ring-2 focus:ring-pink-500 focus:outline-none text-white font-mono uppercase font-bold text-center">
+                        <button onclick="joinRoom()" class="px-5 py-3 bg-pink-600 hover:bg-pink-500 text-white font-bold rounded-2xl transition flex items-center justify-center gap-1 shadow-md">
+                            <i class="fa-solid fa-right-to-bracket"></i>
+                            입장
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="view-room" class="hidden flex-col space-y-6 max-w-3xl mx-auto w-full">
+            <div class="glass-panel p-6 rounded-3xl shadow-xl space-y-6 border border-purple-400/30">
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-purple-500/30">
+                    <div>
+                        <span class="text-xs font-semibold text-amber-300 uppercase tracking-wider">대기실</span>
+                        <h2 class="text-2xl font-bold text-white flex items-center gap-3">
+                            <span id="room-title">방에 참여 중...</span>
+                            <span id="host-badge" class="px-2.5 py-0.5 rounded-md text-xs bg-amber-500/30 text-amber-300 border border-amber-400/40">방장</span>
+                        </h2>
+                    </div>
+                    <div class="bg-purple-950/90 p-3 rounded-2xl border border-amber-400/40 flex items-center gap-3">
+                        <div>
+                            <div class="text-[10px] text-purple-300 uppercase font-bold">초대 방 코드</div>
+                            <div id="display-room-code" class="font-mono text-lg font-black text-amber-300">------</div>
+                        </div>
+                        <button onclick="copyRoomCode()" class="p-2 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 rounded-xl transition" title="코드 복사">
+                            <i class="fa-solid fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-3 gap-3 text-center text-xs">
+                    <div class="glass-card p-3 rounded-2xl">
+                        <div class="text-purple-300 mb-1">라운드 수</div>
+                        <div id="rule-rounds-desc" class="font-bold text-white text-sm">5 라운드</div>
+                    </div>
+                    <div class="glass-card p-3 rounded-2xl">
+                        <div class="text-purple-300 mb-1">시간 제한</div>
+                        <div id="rule-timer-desc" class="font-bold text-amber-300 text-sm">45초</div>
+                    </div>
+                    <div class="glass-card p-3 rounded-2xl">
+                        <div class="text-purple-300 mb-1">시작 난이도</div>
+                        <div id="rule-level-desc" class="font-bold text-emerald-300 text-sm">Lv.1 (새싹)</div>
+                    </div>
+                </div>
+
+                <div>
+                    <h3 class="text-sm font-bold text-purple-200 mb-3 flex items-center justify-between">
+                        <span><i class="fa-solid fa-users text-amber-300 mr-2"></i>참가자 목록</span>
+                        <span id="player-count" class="text-xs text-amber-300 font-mono">1/8 명</span>
+                    </h3>
+                    <div id="lobby-player-list" class="grid grid-cols-1 sm:grid-cols-2 gap-3"></div>
+                </div>
+
+                <div class="space-y-2 pt-2">
+                    <div id="chat-messages" class="h-28 bg-purple-950/70 rounded-2xl p-3 overflow-y-auto text-xs space-y-1.5 border border-purple-500/30">
+                        <div class="text-purple-300 italic">[시스템] 대기실에 입장했습니다.</div>
+                    </div>
+                    <div class="flex gap-2">
+                        <input type="text" id="chat-input" placeholder="대화 내용을 입력하세요..." onkeydown="if(event.key==='Enter' && !event.isComposing) sendChatMessage()"
+                            class="flex-1 bg-purple-950 border border-purple-500/40 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400">
+                        <button onclick="sendChatMessage()" class="px-4 py-2 bg-purple-800 hover:bg-purple-700 text-white text-xs font-bold rounded-xl transition">전송</button>
+                    </div>
+                </div>
+
+                <div class="flex gap-3 pt-2">
+                    <button onclick="leaveRoom()" class="w-1/3 py-3 bg-purple-950 hover:bg-purple-900 text-purple-200 font-bold rounded-2xl transition border border-purple-500/30">나가기</button>
+                    <button id="btn-start-game" onclick="requestStartGame()" class="w-2/3 py-3 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white font-bold rounded-2xl shadow-lg transition">
+                        게임 시작하기 🚀
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="view-game" class="hidden flex-col space-y-4 max-w-4xl mx-auto w-full">
+            <div class="glass-panel p-4 rounded-3xl flex flex-wrap items-center justify-between gap-3 border border-purple-400/30">
+                <div class="flex items-center space-x-3">
+                    <div class="bg-purple-900/80 border border-purple-500/40 px-3 py-1.5 rounded-2xl">
+                        <span class="text-[10px] text-purple-300 block font-bold">ROUND</span>
+                        <span id="game-round-indicator" class="text-base font-black text-amber-300 font-mono">1 / 5</span>
+                    </div>
+
+                    <div class="bg-gradient-to-r from-emerald-600 to-teal-600 px-3.5 py-1.5 rounded-2xl border border-emerald-400/40 text-white">
+                        <span class="text-[10px] text-emerald-100 block font-bold">CURRENT LEVEL</span>
+                        <span id="game-level-text" class="text-xs font-black">Lv.1 (새싹)</span>
+                    </div>
+
+                    <div class="bg-amber-500/20 border border-amber-400/40 px-3 py-1.5 rounded-2xl flex items-center gap-1.5">
+                        <i class="fa-solid fa-star text-amber-300 text-sm"></i>
+                        <span id="hud-hint-count" class="text-sm font-black text-amber-300 font-mono">2</span>
+                    </div>
+                </div>
+
+                <div class="flex items-center space-x-2">
+                    <div id="timer-box" class="flex items-center gap-2 bg-purple-950 border-2 border-emerald-400 px-4 py-2 rounded-2xl text-emerald-300 transition-colors">
+                        <i class="fa-solid fa-stopwatch text-lg"></i>
+                        <span id="timer-text" class="text-xl font-black font-mono min-w-[3rem] text-center">45</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="md:col-span-2 glass-panel p-6 rounded-3xl flex flex-col items-center justify-between min-h-[400px] border border-purple-400/30 relative">
+                    <div id="current-turn-banner" class="w-full py-2 px-4 rounded-2xl bg-purple-900/50 border border-purple-500/40 text-purple-200 text-center text-xs font-bold flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-spinner fa-spin"></i>
+                        <span id="turn-user-name">게임을 준비 중입니다...</span>
+                    </div>
+
+                    <div class="text-center my-4">
+                        <div class="text-xs text-purple-300 font-semibold mb-1">제시된 초성</div>
+                        <div id="chosung-display" class="text-6xl md:text-7xl font-black text-amber-300 tracking-widest font-gaegu py-2 drop-shadow-md">
+                            ㄱ ㅅ
+                        </div>
+                        <button type="button" onclick="speakCurrent()" class="mt-1 mr-1 px-4 py-1 rounded-full text-sm font-bold bg-sky-600/40 hover:bg-sky-600/60 text-sky-100 border border-sky-400/40 inline-block">🔊 다시 듣기</button>
+                        <div id="hint-reveal-box" class="min-h-[28px] mt-1 text-sm font-bold text-pink-300 bg-pink-950/60 px-4 py-1 rounded-full border border-pink-500/30 inline-block hidden">
+                            💡 힌트: <span id="hint-text">--</span>
+                        </div>
+                    </div>
+
+                    <div id="answer-reveal-box" class="w-full bg-amber-950/80 border border-amber-500/50 rounded-2xl p-3 text-center hidden my-2">
+                        <div class="text-xs text-amber-300 font-bold mb-1">📖 대표 정답 예시 모음</div>
+                        <div id="answer-words-list" class="flex flex-wrap justify-center gap-2 text-sm font-bold text-white"></div>
+                    </div>
+
+                    <div class="w-full space-y-3">
+                        <form id="word-form" onsubmit="submitWord(event)" class="relative flex gap-2">
+                            <input type="text" id="word-input" autocomplete="off" placeholder="초성에 맞는 단어를 입력하세요!"
+                                class="w-full px-5 py-3.5 bg-purple-950/90 border-2 border-purple-500/50 rounded-2xl text-lg font-bold text-white focus:outline-none focus:border-amber-400 transition shadow-inner disabled:opacity-50">
+                            <button type="button" id="btn-mic" onclick="toggleMic()" title="말로 대답하기" class="hidden px-4 py-3.5 bg-sky-600 hover:bg-sky-500 text-white rounded-2xl shadow-lg transition disabled:opacity-50"><i class="fa-solid fa-microphone"></i></button>
+                            <button type="submit" id="btn-submit-word" class="px-5 py-3.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white font-black text-base rounded-2xl shadow-lg transition flex items-center justify-center min-w-[80px] disabled:opacity-50">
+                                제출
+                            </button>
+                        </form>
+
+                        <div class="flex justify-between items-center gap-2">
+                            <button id="btn-use-hint" onclick="useHintTicket()" class="px-4 py-2 bg-pink-600/30 hover:bg-pink-600/50 text-pink-200 border border-pink-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 disabled:opacity-40">
+                                <i class="fa-solid fa-lightbulb text-amber-300"></i>
+                                첫 글자 힌트 보기 (1점)
+                            </button>
+
+                            <button id="btn-give-up" onclick="giveUpTurn()" class="px-4 py-2 bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 disabled:opacity-40">
+                                <i class="fa-solid fa-flag"></i>
+                                포기하기
+                            </button>
+                        </div>
+
+                        <div id="feedback-message" class="text-center text-sm font-bold min-h-[22px] text-emerald-300 transition-all opacity-0"></div>
+                    </div>
+                </div>
+
+                <div class="glass-panel p-4 rounded-3xl flex flex-col h-[400px] justify-between space-y-3 border border-purple-400/30">
+                    <div>
+                        <h3 class="text-xs font-bold text-purple-200 uppercase tracking-wider mb-2 flex items-center justify-between">
+                            <span><i class="fa-solid fa-trophy text-amber-300 mr-1.5"></i> 실시간 점수판</span>
+                        </h3>
+                        <div id="game-scoreboard" class="space-y-2 overflow-y-auto max-h-[150px] pr-1"></div>
+                    </div>
+
+                    <div class="flex-1 flex flex-col justify-end border-t border-purple-500/30 pt-3">
+                        <h3 class="text-xs font-bold text-purple-200 uppercase tracking-wider mb-2">
+                            <i class="fa-solid fa-check-circle text-emerald-400 mr-1.5"></i> 맞춘 단어 목록
+                        </h3>
+                        <div id="submitted-words-list" class="flex-1 bg-purple-950/60 rounded-2xl p-2.5 overflow-y-auto border border-purple-500/30 flex flex-wrap gap-1.5 content-start max-h-[140px]"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="view-result" class="hidden flex-col items-center justify-center space-y-6 max-w-xl mx-auto w-full py-8">
+            <div class="glass-panel p-8 rounded-3xl w-full text-center space-y-6 border border-amber-400/40 relative overflow-hidden">
+                <div class="inline-block p-4 bg-amber-400/20 text-amber-300 rounded-full text-5xl mb-1 float-anim">🏆</div>
+                <div>
+                    <h2 class="text-3xl font-black text-white font-gaegu">게임 종료! 수고하셨습니다!</h2>
+                    <p class="text-purple-200 text-sm mt-1">멋진 초성 실력을 보여주었습니다!</p>
+                </div>
+
+                <div id="final-leaderboard" class="space-y-3 my-6"></div>
+
+                <div class="flex gap-3 pt-2">
+                    <button onclick="returnToLobby()" class="w-full py-3.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white font-bold rounded-2xl shadow-lg transition">
+                        로비로 돌아가기
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <div id="create-room-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="glass-panel p-6 rounded-3xl max-w-md w-full border border-purple-400/40 space-y-5">
+            <div class="flex justify-between items-center border-b border-purple-500/30 pb-3">
+                <h3 class="text-lg font-bold text-amber-300 flex items-center gap-2"><i class="fa-solid fa-sliders"></i> 방 설정 및 난이도</h3>
+                <button onclick="toggleModal('create-room-modal')" class="text-purple-300 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+
+            <div class="space-y-4 text-sm">
+                <div>
+                    <label class="block text-xs font-bold text-purple-200 mb-1">시간 제한 설정</label>
+                    <select id="setting-timer-level" class="w-full bg-purple-950 border border-purple-500/40 rounded-2xl p-3 text-white focus:outline-none">
+                        <option value="60">1단계 - 60초 (여유롭게)</option>
+                        <option value="45" selected>2단계 - 45초 (보통)</option>
+                        <option value="30">3단계 - 30초 (빠름)</option>
+                        <option value="15">4단계 - 15초 (도전)</option>
+                        <option value="999">제한 없음</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-purple-200 mb-1">총 라운드 수</label>
+                    <select id="setting-rounds" class="w-full bg-purple-950 border border-purple-500/40 rounded-2xl p-3 text-white focus:outline-none">
+                        <option value="10">10 라운드</option>
+                        <option value="20" selected>20 라운드</option>
+                        <option value="30">30 라운드</option>
+                        <option value="50">50 라운드</option>
+                    </select>
+                </div>
+            </div>
+
+            <button onclick="confirmCreateRoom()" class="w-full py-3 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white font-bold rounded-2xl shadow-lg transition">
+                방 만들기 완료
+            </button>
+        </div>
+    </div>
+
+    <div id="rules-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="glass-panel p-6 rounded-3xl max-w-md w-full border border-purple-400/40 space-y-4">
+            <div class="flex justify-between items-center border-b border-purple-500/30 pb-3">
+                <h3 class="text-lg font-bold text-amber-300 flex items-center gap-2"><i class="fa-solid fa-book"></i> 규칙 안내</h3>
+                <button onclick="toggleModal('rules-modal')" class="text-purple-300 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+            <div class="space-y-3 text-xs text-purple-100 leading-relaxed max-h-[60vh] overflow-y-auto pr-1">
+                <p>1. 💡 <b>힌트</b>: 20초가 지나면 첫 글자 힌트가 저절로 나와요. 힌트 없이 맞히면 2점, 힌트를 보고 맞히면 1점!</p>
+                <p>2. 📖 <b>정답 공개</b>: 시간 초과나 포기 시 교육용 예시 단어를 알려줍니다.</p>
+                <p>3. 🏆 <b>레벨업</b>: 5문제를 맞출 때마다 레벨이 올라가며 더 어려운 낱말이 나옵니다.</p>
+                <p>4. ⭐ <b>점수</b>: 힌트 없이 2점 / 힌트 후 1점. 단어장에 있는 낱말만 정답이에요.</p>
+            </div>
+            <button onclick="toggleModal('rules-modal')" class="w-full py-2.5 bg-purple-900 hover:bg-purple-800 text-white font-bold rounded-xl transition">확인했습니다</button>
+        </div>
+    </div>
+
+    <script>
+        const CHOSUNG_LIST = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'];
+
+        // 초등 단어만, 사용 빈도/난이도 순으로 3단계. 초성은 2~3글자만 출제.
+        const WORDS_BY_LEVEL = {
+            1: `엄마 아빠 언니 오빠 동생 아기 친구 머리 얼굴 이마 입술 어깨 무릎 강아지 고양이 토끼 개구리 코끼리 기린 원숭이 사자 오리 병아리 나비 모기 파리 개미 까치 호랑이 하마 여우 사슴 돼지 고래 상어 사과 포도 딸기 수박 바나나 감자 고구마 당근 오이 호박 양파 마늘 고추 김치 라면 우유 과자 사탕 계란 두부 주스 케이크 피자 치킨 국수 만두 가방 신발 양말 모자 장갑 바지 치마 우산 시계 안경 거울 수건 접시 이불 베개 의자 책상 침대 인형 풍선 로봇 하늘 구름 바람 무지개 번개 바다 나무 학교 병원 공원 시장 버스 기차 비행기 자동차 자전거 선생님 노래 그림`,
+            2: `할머니 삼촌 이모 고모 이웃 가족 손가락 발가락 눈썹 다람쥐 달팽이 잠자리 매미 나방 꿀벌 참새 비둘기 독수리 부엉이 펭귄 문어 오징어 악어 낙타 늑대 너구리 거위 염소 판다 돌고래 새우 조개 거미 거북 갈매기 제비 복숭아 참외 배추 상추 시금치 가지 옥수수 버섯 땅콩 레몬 자두 앵두 키위 망고 호두 도토리 미나리 도라지 부추 햄버거 초콜릿 샌드위치 스파게티 팝콘 푸딩 젤리 식빵 도넛 떡국 생선 소시지 샐러드 교실 칠판 연필 지우개 공책 필통 가위 교과서 급식 소풍 방학 숙제 시험 체육 음악 미술 국어 수학 냉장고 세탁기 전화기 선풍기 청소기 열쇠 지갑 주전자 창문 현관 지붕 서랍 지하철 오토바이 트럭 헬리콥터 동물원 수영장 약국 서점 식당 은행 극장 빵집 꽃집 줄넘기 블록 딱지 축구 야구 농구 수영 그네 시소 썰매 스키 피아노 장난감 만화 동화`,
+            3: `안개 호수 폭포 바위 모래 씨앗 열매 장미 튤립 민들레 개나리 진달래 코스모스 단풍 낙엽 이슬 서리 소나기 도서관 반장 짝꿍 복도 계단 교문 식물 동물 곤충 지구 태양 우주 행성 화산 지진 태풍 시민 국민 정부 대통령 법원 선거 투표 경찰 소방관 의사 간호사 요리사 화가 가수 배우 기자 정직 성실 배려 존중 책임 협동 양보 봉사 우정 예절 규칙 약속 용기 인내 절약 감사 겸손 분수 소수 도형 삼각형 사각형 평균 그래프 지름 문장 단어 낱말 받침 일기 편지 동시 건강 운동 영양 습관 취미 여행 직업 안전 환경 재활용 박물관`
+        };
+        const ALL_WORDS = {};   // 초성 -> 모든 레벨의 정답 단어 (정답 판정용)
+        const _lvWords = {};
+        Object.entries(WORDS_BY_LEVEL).forEach(([lv, txt]) => {
+            _lvWords[lv] = [...new Set(txt.split(/\s+/).filter(w => w.length >= 2 && w.length <= 3))];
+            _lvWords[lv].forEach(w => {
+                const c = extractChosung(w);
+                ALL_WORDS[c] = ALL_WORDS[c] || [];
+                if (!ALL_WORDS[c].includes(w)) ALL_WORDS[c].push(w);
+            });
+        });
+        // 정답으로만 인정하는 추가 낱말 (문제로는 나오지 않음)
+        const EXTRA_ACCEPTED = `가게 가루 가수 가을 간식 감기 강물 거리 거품 건물 겨울 계곡 고무 고장 공부 공장 과일 관심 광장 구두 구멍 국물 군인 그림자 글씨 기름 기억 기쁨 기타 길가 까마귀 깃발 꽃밭 나라 나이 나중 나팔 난로 날개 남자 낮잠 냄새 노랑 놀이 농부 눈사람 느낌 다음 단추 달걀 담요 대문 대답 도둑 도마 도시 도움 독서 돌멩이 동굴 동네 동전 뒷산 땅콩 마당 마음 마을 마차 막대 말씀 맛집 매일 머리띠 먼지 메뉴 모래 모양 목걸이 목소리 무게 문어 물감 물고기 미소 민속 바닥 바둑 배달 벽돌 보도 부두 빈대 바구니 바퀴 박수 반지 발자국 방귀 방석 방울 배꼽 백조 버터 벌레 별빛 보리 보물 보자기 복도 봉투 부엌 부채 북극 분홍 불꽃 비밀 빗자루 빨강 뿌리 사다리 사랑 사진 산책 상자 새벽 색깔 샌들 생일 선물 설탕 세수 소금 소리 소매 소방차 손님 손수건 쇼핑 수레 수저 숲속 스웨터 시간 식탁 신문 실수 심부름 쌀밥 쓰레기 아침 아이 악수 안내 알림 앞치마 양동이 어린이 어른 어제 얼음 엄지 여자 연기 연못 열차 영화 옆집 오늘 오후 옷장 와플 왕관 요리 욕심 우체통 웃음 유리 음식 이야기 입구 자랑 자리 자석 작품 잔디 잠옷 장난 재미 저울 전기 점심 정원 종이 주사 주머니 줄다리기 진흙 쪽지 창문 책가방 책꽂이 천사 철봉 청소 체조 초대 초록 촛불 출발 칭찬 카드 커튼 콧물 크레파스 타일 탁자 택시 터널 통닭 트럼펫 티셔츠 파도 파랑 팔찌 평화 폭죽 표정 풀밭 피리 한복 합창 항구 햇빛 행복 허리 형제 화분 화장 휴지 흙탕`;
+        EXTRA_ACCEPTED.split(/\s+/).filter(w => w.length >= 2 && w.length <= 3).forEach(w => {
+            const c = extractChosung(w);
+            ALL_WORDS[c] = ALL_WORDS[c] || [];
+            if (!ALL_WORDS[c].includes(w)) ALL_WORDS[c].push(w);
+        });
+        const DICTIONARY_BY_LEVEL = {};
+        Object.keys(_lvWords).forEach(lv => {
+            const cs = [...new Set(_lvWords[lv].map(extractChosung))];
+            DICTIONARY_BY_LEVEL[lv] = cs.map(c => ({
+                chosung: c,
+                words: [..._lvWords[lv].filter(w => extractChosung(w) === c), ...ALL_WORDS[c].filter(w => !_lvWords[lv].includes(w))]
+            }));
+        });
+
+        const LEVEL_NAMES = {
+            1: "Lv.1 (새싹 🌱)",
+            2: "Lv.2 (줄기 🌿)",
+            3: "Lv.3 (꽃 🌸)"
+        };
+
+        let usedChosungHistory = [];
+
+        function extractChosung(text) {
+            let result = "";
+            for (let i = 0; i < text.length; i++) {
+                const code = text.charCodeAt(i) - 44032;
+                if (code >= 0 && code < 11172) {
+                    const chosungIndex = Math.floor(code / 588);
+                    result += CHOSUNG_LIST[chosungIndex];
+                } else {
+                    result += text.charAt(i);
+                }
+            }
+            return result;
+        }
+
+        function getLevelQuestion(level) {
+            const pool = DICTIONARY_BY_LEVEL[level] || DICTIONARY_BY_LEVEL[1];
+            let available = pool.filter(item => !usedChosungHistory.includes(item.chosung));
+            
+            if (available.length === 0) {
+                usedChosungHistory = [];
+                available = pool;
+            }
+
+            const chosen = available[Math.floor(Math.random() * available.length)];
+            usedChosungHistory.push(chosen.chosung);
+            return chosen;
+        }
+
+        function validateWordLocally(word, targetChosung, level) {
+            if (!word || extractChosung(word) !== targetChosung) {
+                return { valid: false, reason: "초성이 일치하지 않습니다!" };
+            }
+            if ((ALL_WORDS[targetChosung] || []).includes(word)) {
+                return { valid: true };
+            }
+            return { valid: false, reason: "단어장에 없는 낱말이에요. 다른 낱말을 생각해볼까요?" };
+        }
+    </script>
+
+    <script>
+        let localPlayer = {
+            id: '',
+            name: '어린이' + Math.floor(100 + Math.random() * 900),
+            score: 0,
+            hintsLeft: 2,
+            correctCount: 0,
+            level: 1,
+            isHost: false
+        };
+
+        let gameSettings = {
+            maxRounds: 20,
+            timerSeconds: 45
+        };
+
+        let gameState = {
+            status: 'LOBBY',
+            roomCode: '',
+            currentRound: 1,
+            currentChosungObj: null,
+            turnIndex: 0,
+            players: [],
+            submittedWords: [],
+            timer: 45,
+            timerInterval: null
+        };
+
+        let peer = null;
+        let connections = {};
+        let isSinglePlayer = false;
+        let turnLocked = false;
+        let turnSeq = 0;
+        let hintTimer = null;
+        let feedbackTimer = null;
+
+        document.getElementById('player-nickname').value = localPlayer.name;
+
+        function clearGameTimer() {
+            if (gameState.timerInterval) {
+                clearInterval(gameState.timerInterval);
+                gameState.timerInterval = null;
+            }
+        }
+
+        function genRoomCode() {
+            const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = '';
+            for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)];
+            return s;
+        }
+        function esc(s) {
+            return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+        }
+
+        function initPeer(callback, customId) {
+            if (peer) {
+                if (callback) callback();
+                return;
+            }
+
+            updateP2PStatus('connecting', '연결 중...');
+            peer = customId ? new Peer(customId) : new Peer();
+
+            peer.on('open', (id) => {
+                localPlayer.id = id;
+                updateP2PStatus('online', '온라인');
+                if (callback) callback();
+            });
+
+            peer.on('connection', (conn) => {
+                if (!localPlayer.isHost) return;
+
+                conn.on('open', () => {
+                    connections[conn.peer] = conn;
+                });
+
+                conn.on('data', (data) => {
+                    handleHostReceivedData(conn.peer, data);
+                });
+
+                conn.on('close', () => handlePlayerLeft(conn.peer));
+            });
+
+            peer.on('error', (err) => {
+                console.error("PeerJS Error:", err);
+                if (err.type === 'unavailable-id' && customId) {
+                    peer.destroy(); peer = null;
+                    initPeer(callback, 'chsk-' + genRoomCode().toLowerCase());
+                    return;
+                }
+                if (err.type === 'peer-unavailable') {
+                    alert("방을 찾을 수 없어요. 방 코드를 다시 확인해주세요!");
+                    delete connections['HOST'];
+                    updateP2PStatus('online', '온라인');
+                    return;
+                }
+                updateP2PStatus('offline', '오류 발생');
+            });
+        }
+
+        function updateP2PStatus(state, text) {
+            const badge = document.getElementById('p2p-status-badge');
+            const dot = document.getElementById('p2p-dot');
+            const statusText = document.getElementById('p2p-status-text');
+
+            statusText.innerText = text;
+            if (state === 'online') {
+                dot.className = "w-2 h-2 rounded-full bg-emerald-400 animate-pulse";
+                badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-emerald-900/60 text-emerald-300 border border-emerald-500/40 flex items-center gap-2";
+            } else if (state === 'connecting') {
+                dot.className = "w-2 h-2 rounded-full bg-amber-400 animate-ping";
+                badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-amber-900/60 text-amber-300 border border-amber-500/40 flex items-center gap-2";
+            } else {
+                dot.className = "w-2 h-2 rounded-full bg-rose-500";
+                badge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-rose-900/60 text-rose-300 border border-rose-500/40 flex items-center gap-2";
+            }
+        }
+
+        function startSinglePlayer() {
+            audio.init();
+            audio.playPop();
+            const nameInput = document.getElementById('player-nickname').value.trim();
+            if (nameInput) localPlayer.name = nameInput;
+
+            isSinglePlayer = true;
+            localPlayer.isHost = true;
+            localPlayer.id = 'LOCAL_HOST';
+            localPlayer.score = 0;
+            localPlayer.hintsLeft = 2;
+            localPlayer.correctCount = 0;
+            localPlayer.level = 1;
+
+            const aiPlayer = { id: 'AI_BOT', name: '초성 로봇 🤖', score: 0, hintsLeft: 2, correctCount: 0, level: 1, isHost: false };
+
+            usedChosungHistory = [];
+            gameState = {
+                status: 'PLAYING',
+                roomCode: 'SINGLE',
+                currentRound: 1,
+                currentChosungObj: null,
+                turnIndex: 0,
+                players: [localPlayer, aiPlayer],
+                submittedWords: [],
+                timer: gameSettings.timerSeconds,
+                timerInterval: null
+            };
+
+            switchView('view-game');
+            setupRound();
+        }
+
+        function openCreateRoomModal() {
+            audio.init();
+            audio.playPop();
+            toggleModal('create-room-modal');
+        }
+
+        function confirmCreateRoom() {
+            toggleModal('create-room-modal');
+            const nameInput = document.getElementById('player-nickname').value.trim();
+            if (nameInput) localPlayer.name = nameInput;
+
+            gameSettings.timerSeconds = parseInt(document.getElementById('setting-timer-level').value);
+            gameSettings.maxRounds = parseInt(document.getElementById('setting-rounds').value);
+
+            initPeer(() => {
+                localPlayer.isHost = true;
+                localPlayer.score = 0;
+                localPlayer.hintsLeft = 2;
+                localPlayer.correctCount = 0;
+                localPlayer.level = 1;
+
+                const roomCode = localPlayer.id.replace('chsk-', '').toUpperCase();
+                gameState = {
+                    status: 'LOBBY',
+                    roomCode: roomCode,
+                    currentRound: 1,
+                    currentChosungObj: null,
+                    turnIndex: 0,
+                    players: [localPlayer],
+                    submittedWords: [],
+                    timer: gameSettings.timerSeconds,
+                    timerInterval: null
+                };
+
+                updateLobbyUI();
+                switchView('view-room');
+            }, 'chsk-' + genRoomCode().toLowerCase());
+        }
+
+        function joinRoom() {
+            audio.init();
+            audio.playPop();
+            const nameInput = document.getElementById('player-nickname').value.trim();
+            if (nameInput) localPlayer.name = nameInput;
+
+            const targetCode = document.getElementById('join-room-code').value.trim();
+            if (!targetCode) {
+                alert("방 코드를 입력해주세요!");
+                return;
+            }
+
+            if (connections['HOST']) return;
+            initPeer(() => {
+                localPlayer.isHost = false;
+                localPlayer.score = 0;
+                localPlayer.hintsLeft = 2;
+                localPlayer.correctCount = 0;
+                localPlayer.level = 1;
+
+                updateP2PStatus('connecting', '방 연결 중...');
+                const hostConn = peer.connect('chsk-' + targetCode.toLowerCase());
+                connections['HOST'] = hostConn;
+
+                hostConn.on('open', () => {
+                    updateP2PStatus('online', '입장 완료');
+                    hostConn.send({
+                        type: 'JOIN_REQUEST',
+                        player: localPlayer
+                    });
+                });
+
+                hostConn.on('data', (data) => {
+                    handleClientReceivedData(data);
+                });
+
+                hostConn.on('close', () => {
+                    alert("방장과 연결이 끊어졌습니다.");
+                    location.reload();
+                });
+            });
+        }
+
+        function updateLobbyUI() {
+            const hostP = gameState.players.find(p => p.isHost) || localPlayer;
+            document.getElementById('room-title').innerText = `${hostP.name}님의 대기실`;
+            document.getElementById('display-room-code').innerText = gameState.roomCode;
+            document.getElementById('host-badge').style.display = localPlayer.isHost ? 'inline-block' : 'none';
+
+            document.getElementById('rule-rounds-desc').innerText = `${gameSettings.maxRounds} 라운드`;
+            document.getElementById('rule-timer-desc').innerText = gameSettings.timerSeconds === 999 ? "무제한" : `${gameSettings.timerSeconds}초`;
+            document.getElementById('rule-level-desc').innerText = LEVEL_NAMES[localPlayer.level];
+
+            document.getElementById('player-count').innerText = `${gameState.players.length}/8 명`;
+
+            const listContainer = document.getElementById('lobby-player-list');
+            listContainer.innerHTML = '';
+
+            gameState.players.forEach((p) => {
+                const card = document.createElement('div');
+                card.className = "glass-card p-3 rounded-2xl flex items-center justify-between border border-white/5";
+                card.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        <div class="w-8 h-8 rounded-full bg-gradient-to-r from-amber-400 to-orange-500 flex items-center justify-center font-bold text-xs text-white">
+                            ${esc(p.name.charAt(0))}
+                        </div>
+                        <span class="font-bold text-sm text-slate-100">${esc(p.name)} ${p.id === localPlayer.id ? '(나)' : ''}</span>
+                    </div>
+                    ${p.isHost ? '<span class="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">방장</span>' : '<span class="text-[10px] text-purple-300">참가자</span>'}
+                `;
+                listContainer.appendChild(card);
+            });
+
+            const startBtn = document.getElementById('btn-start-game');
+            if (localPlayer.isHost) {
+                startBtn.disabled = false;
+                startBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            } else {
+                startBtn.disabled = true;
+                startBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        function copyRoomCode() {
+            audio.playPop();
+            const code = document.getElementById('display-room-code').innerText;
+            if (!navigator.clipboard) { prompt('아래 코드를 복사하세요', code); return; }
+            navigator.clipboard.writeText(code).then(() => {
+                alert(`방 코드 (${code})가 복사되었습니다!`);
+            });
+        }
+
+        function leaveRoom() {
+            audio.playPop();
+            location.reload();
+        }
+
+        function handlePlayerLeft(pid) {
+            delete connections[pid];
+            const idx = gameState.players.findIndex(p => p.id === pid);
+            if (idx < 0) return;
+            const name = gameState.players[idx].name;
+            const wasCurrent = gameState.status === 'PLAYING' && idx === gameState.turnIndex;
+            gameState.players.splice(idx, 1);
+            sendChatSystemMessage(`${name}님이 나갔습니다.`);
+            if (gameState.status === 'PLAYING') {
+                if (idx < gameState.turnIndex) gameState.turnIndex--;
+                if (wasCurrent) {
+                    if (gameState.turnIndex >= gameState.players.length) {
+                        gameState.turnIndex = 0;
+                        gameState.currentRound++;
+                        if (gameState.currentRound > gameSettings.maxRounds) { endGame(); return; }
+                    }
+                    setupRound();
+                    return;
+                }
+                renderGameView();
+            }
+            broadcastGameState();
+            updateLobbyUI();
+        }
+
+        function handleHostReceivedData(peerId, data) {
+            if (data.type === 'JOIN_REQUEST') {
+                if (gameState.status !== 'LOBBY' || gameState.players.length >= 8) {
+                    if (connections[peerId]) connections[peerId].send({ type: 'JOIN_DENIED', reason: gameState.status !== 'LOBBY' ? '이미 게임이 시작된 방이에요.' : '방이 가득 찼어요. (최대 8명)' });
+                    return;
+                }
+                const newPlayer = { id: peerId, name: String((data.player && data.player.name) || '참가자').slice(0, 10), score: 0, hintsLeft: 2, correctCount: 0, level: 1, isHost: false };
+                gameState.players.push(newPlayer);
+                broadcastGameState();
+                updateLobbyUI();
+                sendChatSystemMessage(`${newPlayer.name}님이 입장하였습니다.`);
+            } else if (data.type === 'SUBMIT_WORD') {
+                processWordSubmission(peerId, data.word);
+            } else if (data.type === 'USE_HINT') {
+                processHint(peerId);
+            } else if (data.type === 'GIVE_UP') {
+                processGiveUp(peerId);
+            } else if (data.type === 'CHAT_MESSAGE') {
+                broadcastMessage(data);
+                appendChatMessage(data.sender, data.text);
+            }
+        }
+
+        function handleClientReceivedData(data) {
+            if (data.type === 'SYNC_STATE') {
+                gameState = data.gameState;
+                gameSettings = data.gameSettings;
+
+                const myUpdated = gameState.players.find(p => p.id === localPlayer.id);
+                if (myUpdated) {
+                    localPlayer.score = myUpdated.score;
+                    localPlayer.hintsLeft = myUpdated.hintsLeft;
+                    localPlayer.correctCount = myUpdated.correctCount;
+                    localPlayer.level = myUpdated.level;
+                }
+
+                if (gameState.status === 'LOBBY') {
+                    switchView('view-room');
+                    updateLobbyUI();
+                } else if (gameState.status === 'PLAYING') {
+                    switchView('view-game');
+                    renderGameView();
+                } else if (gameState.status === 'GAME_OVER') {
+                    switchView('view-result');
+                    renderResultsView();
+                }
+            } else if (data.type === 'CHAT_MESSAGE') {
+                appendChatMessage(data.sender, data.text);
+            } else if (data.type === 'FEEDBACK') {
+                showFeedback(data.message, data.isSuccess);
+                if (data.isSuccess) audio.playSuccess();
+                else audio.playFail();
+            } else if (data.type === 'JOIN_DENIED') {
+                alert(data.reason);
+                location.reload();
+            } else if (data.type === 'REVEAL_ANSWERS') {
+                revealEducationalAnswers(data.answers);
+            }
+        }
+
+        function broadcastGameState() {
+            if (!localPlayer.isHost) return;
+            const payload = {
+                type: 'SYNC_STATE',
+                gameState: gameState,
+                gameSettings: gameSettings
+            };
+            Object.values(connections).forEach(conn => {
+                if (conn && conn.open) conn.send(payload);
+            });
+        }
+
+        function broadcastMessage(msgData) {
+            Object.values(connections).forEach(conn => {
+                if (conn && conn.open) conn.send(msgData);
+            });
+        }
+
+        function sendChatMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const msgData = {
+                type: 'CHAT_MESSAGE',
+                sender: localPlayer.name,
+                text: text
+            };
+
+            if (localPlayer.isHost) {
+                broadcastMessage(msgData);
+                appendChatMessage(localPlayer.name, text);
+            } else if (connections['HOST']) {
+                connections['HOST'].send(msgData);
+                appendChatMessage(localPlayer.name, text);
+            }
+
+            input.value = '';
+        }
+
+        function appendChatMessage(sender, text) {
+            const container = document.getElementById('chat-messages');
+            const div = document.createElement('div');
+            div.className = "text-purple-100";
+            div.innerHTML = `<span class="font-bold text-amber-300">${esc(sender)}:</span> ${esc(text)}`;
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function sendChatSystemMessage(text) {
+            appendChatMessage("시스템", text);
+            if (localPlayer.isHost) {
+                broadcastMessage({ type: 'CHAT_MESSAGE', sender: "시스템", text: text });
+            }
+        }
+
+        function requestStartGame() {
+            if (!localPlayer.isHost) return;
+            audio.playPop();
+
+            usedChosungHistory = [];
+            gameState.status = 'PLAYING';
+            gameState.currentRound = 1;
+            gameState.turnIndex = 0;
+            gameState.submittedWords = [];
+            gameState.players.forEach(p => {
+                p.score = 0;
+                p.hintsLeft = 2;
+                p.correctCount = 0;
+                p.level = 1;
+            });
+
+            switchView('view-game');
+            setupRound();
+        }
+
+        function setupRound() {
+            if (!localPlayer.isHost) return;
+
+            clearGameTimer();
+
+            const currentTurnPlayer = gameState.players[gameState.turnIndex];
+            const currentLevel = currentTurnPlayer.level || 1;
+
+            gameState.currentChosungObj = getLevelQuestion(currentLevel);
+
+            turnLocked = false;
+            turnSeq++;
+            gameState.hintUsed = false;
+            gameState.revealed = false;
+            document.getElementById('word-input').value = '';
+
+            startTurnTimer();
+            clearTimeout(hintTimer);
+            hintTimer = setTimeout(((s) => () => {
+                if (s !== turnSeq || turnLocked || gameState.status !== 'PLAYING' || gameState.hintUsed) return;
+                gameState.hintUsed = true;
+                audio.playHint();
+                broadcastGameState();
+                renderGameView();
+                showFeedback("💡 힌트가 나왔어요! 이제 맞히면 1점", true);
+            })(turnSeq), 20000);
+            broadcastGameState();
+            renderGameView();
+        }
+
+        function startTurnTimer() {
+            clearGameTimer();
+
+            if (gameSettings.timerSeconds === 999) {
+                document.getElementById('timer-text').innerText = "무제한";
+                return;
+            }
+
+            gameState.timer = gameSettings.timerSeconds;
+
+            gameState.timerInterval = setInterval(() => {
+                if (!localPlayer.isHost) return;
+
+                gameState.timer--;
+                if (gameState.timer <= 3 && gameState.timer > 0) {
+                    audio.playTick();
+                }
+
+                if (gameState.timer <= 0) {
+                    clearGameTimer();
+                    audio.playFail();
+                    handleTurnTimeout();
+                } else {
+                    broadcastGameState();
+                    renderGameTimer();
+                }
+            }, 1000);
+        }
+
+        function handleTurnTimeout() {
+            if (!localPlayer.isHost || turnLocked) return;
+            turnLocked = true;
+
+            const currentTurnPlayer = gameState.players[gameState.turnIndex];
+            const answers = gameState.currentChosungObj ? gameState.currentChosungObj.words : [];
+
+            sendChatSystemMessage(`${currentTurnPlayer.name}님의 시간이 지나갔습니다!`);
+            revealEducationalAnswers(answers);
+
+            setTimeout(((s) => () => { if (s === turnSeq) nextTurn(); })(turnSeq), 3000);
+        }
+
+        function giveUpTurn() {
+            audio.playPop();
+            const currentTurnPlayer = gameState.players[gameState.turnIndex];
+            if (currentTurnPlayer.id !== localPlayer.id) return;
+
+            if (localPlayer.isHost) {
+                processGiveUp(localPlayer.id);
+            } else if (connections['HOST']) {
+                connections['HOST'].send({ type: 'GIVE_UP' });
+            }
+        }
+
+        function processGiveUp(playerId) {
+            if (!localPlayer.isHost || turnLocked) return;
+            const cur = gameState.players[gameState.turnIndex];
+            if (!cur || cur.id !== playerId) return;
+            turnLocked = true;
+
+            clearGameTimer();
+            const currentTurnPlayer = gameState.players[gameState.turnIndex];
+            const answers = gameState.currentChosungObj ? gameState.currentChosungObj.words : [];
+
+            sendChatSystemMessage(`${currentTurnPlayer.name}님이 포기하셨습니다. 정답을 공개합니다!`);
+            revealEducationalAnswers(answers);
+
+            setTimeout(((s) => () => { if (s === turnSeq) nextTurn(); })(turnSeq), 3000);
+        }
+
+        function showAnswerBox(answers) {
+            const box = document.getElementById('answer-reveal-box');
+            const list = document.getElementById('answer-words-list');
+            list.innerHTML = '';
+
+            answers.slice(0, 10).forEach(w => {
+                const chip = document.createElement('span');
+                chip.className = "px-3 py-1 bg-amber-400 text-purple-950 rounded-xl font-black";
+                chip.innerText = w;
+                list.appendChild(chip);
+            });
+
+            box.classList.remove('hidden');
+
+        }
+
+        function revealEducationalAnswers(answers) {
+            showAnswerBox(answers);
+            if (localPlayer.isHost) {
+                gameState.revealed = true;
+                broadcastGameState();
+            }
+        }
+
+        function useHintTicket() {
+            const cur = gameState.players[gameState.turnIndex];
+            if (!cur || cur.id !== localPlayer.id) { showFeedback("당신의 차례에만 힌트를 쓸 수 있어요!", false); return; }
+            if (gameState.hintUsed) { showFeedback("이번 턴에는 이미 힌트를 확인했어요!", false); return; }
+            
+            if (localPlayer.isHost) processHint(localPlayer.id);
+            else if (connections['HOST']) connections['HOST'].send({ type: 'USE_HINT' });
+        }
+
+        function processHint(playerId) {
+            if (!localPlayer.isHost || turnLocked || gameState.hintUsed) return;
+            const cur = gameState.players[gameState.turnIndex];
+            if (!cur || cur.id !== playerId) return;
+            gameState.hintUsed = true;
+            if (playerId === localPlayer.id) audio.playHint();
+            sendFeedbackToPlayer(playerId, "💡 첫 글자 힌트! 이제 맞히면 1점이에요", true);
+            broadcastGameState();
+            renderGameView();
+        }
+
+        function nextTurn() {
+            if (!localPlayer.isHost) return;
+
+            clearGameTimer();
+
+            gameState.turnIndex = (gameState.turnIndex + 1) % gameState.players.length;
+
+            if (gameState.turnIndex === 0) {
+                gameState.currentRound++;
+                if (gameState.currentRound > gameSettings.maxRounds) {
+                    endGame();
+                    return;
+                }
+            }
+
+            setupRound();
+
+            if (isSinglePlayer && gameState.players[gameState.turnIndex].id === 'AI_BOT') {
+                setTimeout(((s) => () => { if (s === turnSeq) runAITurn(); })(turnSeq), 2000);
+            }
+        }
+
+        function runAITurn() {
+            if (!localPlayer.isHost || gameState.status !== 'PLAYING') return;
+
+            const answers = (gameState.currentChosungObj ? gameState.currentChosungObj.words : []).filter(w => !gameState.submittedWords.includes(w));
+            if (answers.length > 0 && Math.random() > 0.25) {
+                const aiWord = answers[Math.floor(Math.random() * answers.length)];
+                processWordSubmission('AI_BOT', aiWord);
+            } else {
+                processGiveUp('AI_BOT');
+            }
+        }
+
+        function submitWord(event) {
+            event.preventDefault();
+            const input = document.getElementById('word-input');
+            const word = input.value.trim();
+            if (!word) return;
+
+            input.value = '';
+
+            const currentTurnPlayer = gameState.players[gameState.turnIndex];
+            if (currentTurnPlayer.id !== localPlayer.id) {
+                showFeedback("당신의 차례가 아닙니다!", false);
+                audio.playFail();
+                return;
+            }
+
+            if (localPlayer.isHost) {
+                processWordSubmission(localPlayer.id, word);
+            } else if (connections['HOST']) {
+                connections['HOST'].send({ type: 'SUBMIT_WORD', word: word });
+            }
+        }
+
+        function processWordSubmission(playerId, word) {
+            if (!localPlayer.isHost || turnLocked) return;
+            const curTurn = gameState.players[gameState.turnIndex];
+            if (!curTurn || curTurn.id !== playerId) return;
+
+            if (gameState.submittedWords.includes(word)) {
+                sendFeedbackToPlayer(playerId, "이미 제출된 단어입니다!", false);
+                return;
+            }
+
+            const playerObj = gameState.players.find(p => p.id === playerId);
+            const valResult = validateWordLocally(word, gameState.currentChosungObj.chosung, playerObj.level || 1);
+
+            if (!valResult.valid) {
+                sendFeedbackToPlayer(playerId, valResult.reason, false);
+                return;
+            }
+
+            const points = gameState.hintUsed ? 1 : 2;
+            playerObj.score += points;
+            playerObj.correctCount++;
+
+            let bonus = '';
+            bonus = gameState.hintUsed ? '' : ' ⭐ 힌트 없이 성공!';
+
+            if (playerObj.correctCount >= playerObj.level * 5 && playerObj.level < 3) {
+                playerObj.level++;
+                audio.playLevelUp();
+                sendChatSystemMessage(`🎊 ${playerObj.name}님이 ${LEVEL_NAMES[playerObj.level]}로 레벨업 하셨습니다!`);
+            }
+
+            gameState.submittedWords.push(word);
+            sendFeedbackToPlayer(playerId, `정답입니다! +${points}점 (${word})${bonus}`, true);
+            sendChatSystemMessage(`${playerObj.name}: ${word} (+${points}점)`);
+
+            nextTurn();
+        }
+
+        function sendFeedbackToPlayer(playerId, message, isSuccess) {
+            if (playerId === localPlayer.id) {
+                showFeedback(message, isSuccess);
+                if (isSuccess) audio.playSuccess();
+                else audio.playFail();
+            } else if (connections[playerId]) {
+                connections[playerId].send({
+                    type: 'FEEDBACK',
+                    message: message,
+                    isSuccess: isSuccess
+                });
+            }
+        }
+
+        function showFeedback(msg, isSuccess) {
+            const el = document.getElementById('feedback-message');
+            el.innerText = msg;
+            el.className = `text-center text-sm font-bold min-h-[22px] transition-all opacity-100 ${isSuccess ? 'text-emerald-300' : 'text-rose-300'}`;
+            clearTimeout(feedbackTimer);
+            feedbackTimer = setTimeout(() => {
+                el.classList.remove('opacity-100');
+                el.classList.add('opacity-0');
+            }, 2500);
+        }
+
+        function renderGameView() {
+            document.getElementById('game-round-indicator').innerText = `${gameState.currentRound} / ${gameSettings.maxRounds}`;
+
+            if (gameState.currentChosungObj) {
+                document.getElementById('chosung-display').innerText = gameState.currentChosungObj.chosung.split('').join(' ');
+            }
+
+            const currentTurnPlayer = gameState.players[gameState.turnIndex];
+            const isMyTurn = currentTurnPlayer.id === localPlayer.id;
+
+            document.getElementById('game-level-text').innerText = LEVEL_NAMES[currentTurnPlayer.level || 1];
+            document.getElementById('hud-hint-count').innerText = (gameState.hintUsed ? 1 : 2) + '점';
+
+            const turnBanner = document.getElementById('turn-user-name');
+            if (isMyTurn) {
+                turnBanner.innerText = "🎯 당신의 차례입니다! 단어를 입력하세요!";
+                document.getElementById('word-input').disabled = false;
+                document.getElementById('btn-submit-word').disabled = false;
+                document.getElementById('btn-use-hint').disabled = false;
+                document.getElementById('btn-give-up').disabled = false;
+            } else {
+                turnBanner.innerText = `⏳ [${currentTurnPlayer.name}] 님의 차례입니다...`;
+                document.getElementById('word-input').disabled = true;
+                document.getElementById('btn-submit-word').disabled = true;
+                document.getElementById('btn-use-hint').disabled = true;
+                document.getElementById('btn-give-up').disabled = true;
+            }
+
+            const words = gameState.currentChosungObj ? gameState.currentChosungObj.words : [];
+            document.getElementById('hint-reveal-box').classList.toggle('hidden', !gameState.hintUsed);
+            if (gameState.hintUsed) document.getElementById('hint-text').innerText = `첫 글자는 '${(words[0] || '').charAt(0)}' 입니다!`;
+            const qKey = gameState.currentRound + '-' + gameState.turnIndex + '-' + (gameState.currentChosungObj ? gameState.currentChosungObj.chosung : '');
+            if (qKey !== lastQKey && gameState.currentChosungObj && gameState.status === 'PLAYING') {
+                lastQKey = qKey;
+                lastHintSpoken = false;
+                speak(`${currentTurnPlayer.name} 차례예요. ${readChosung(gameState.currentChosungObj.chosung)}`);
+            }
+            if (gameState.hintUsed && !lastHintSpoken) {
+                lastHintSpoken = true;
+                speak(`첫 글자는 ${(words[0] || '').charAt(0)}`);
+            }
+            if (gameState.revealed) showAnswerBox(words);
+            else document.getElementById('answer-reveal-box').classList.add('hidden');
+
+            renderGameTimer();
+            renderScoreboard();
+            renderSubmittedWords();
+        }
+
+        function renderGameTimer() {
+            const timerBox = document.getElementById('timer-box');
+            const timerText = document.getElementById('timer-text');
+
+            if (gameSettings.timerSeconds === 999) {
+                timerText.innerText = "무제한";
+                timerBox.className = "flex items-center gap-2 bg-purple-950 border-2 border-emerald-400 px-4 py-2 rounded-2xl text-emerald-300";
+                return;
+            }
+
+            timerText.innerText = gameState.timer;
+
+            if (gameState.timer <= 5) {
+                timerBox.className = "flex items-center gap-2 bg-rose-950 border-2 border-rose-500 px-4 py-2 rounded-2xl text-rose-300 animate-bounce";
+            } else {
+                timerBox.className = "flex items-center gap-2 bg-purple-950 border-2 border-emerald-400 px-4 py-2 rounded-2xl text-emerald-300";
+            }
+        }
+
+        function renderScoreboard() {
+            const container = document.getElementById('game-scoreboard');
+            container.innerHTML = '';
+
+            const sorted = [...gameState.players].sort((a, b) => b.score - a.score);
+
+            sorted.forEach((p, index) => {
+                const isCurrentTurn = gameState.players[gameState.turnIndex].id === p.id;
+                const card = document.createElement('div');
+                card.className = `p-2.5 rounded-2xl flex items-center justify-between border transition ${
+                    isCurrentTurn ? 'bg-amber-500/20 border-amber-400 active-turn-card' : 'glass-card border-white/5'
+                }`;
+                card.innerHTML = `
+                    <div class="flex items-center space-x-2">
+                        <span class="font-bold text-xs text-amber-300 w-4">${index + 1}</span>
+                        <span class="font-bold text-xs text-purple-100">${esc(p.name)} ${p.id === localPlayer.id ? '★' : ''}</span>
+                    </div>
+                    <div class="text-right">
+                        <span class="font-mono font-black text-amber-300 text-sm block">${p.score}점</span>
+                        <span class="text-[9px] text-emerald-300 block">${LEVEL_NAMES[p.level || 1]}</span>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function renderSubmittedWords() {
+            const container = document.getElementById('submitted-words-list');
+            container.innerHTML = '';
+
+            gameState.submittedWords.forEach(word => {
+                const chip = document.createElement('span');
+                chip.className = "px-2.5 py-1 bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-xl text-xs font-bold";
+                chip.innerText = word;
+                container.appendChild(chip);
+            });
+        }
+
+        function endGame() {
+            clearGameTimer();
+            gameState.status = 'GAME_OVER';
+            broadcastGameState();
+            switchView('view-result');
+            renderResultsView();
+        }
+
+        function renderResultsView() {
+            const container = document.getElementById('final-leaderboard');
+            container.innerHTML = '';
+
+            const sorted = [...gameState.players].sort((a, b) => b.score - a.score);
+
+            sorted.forEach((p, idx) => {
+                const card = document.createElement('div');
+                card.className = `p-4 rounded-2xl flex items-center justify-between border ${
+                    idx === 0 ? 'bg-amber-500/20 border-amber-400 text-amber-200' : 'glass-card border-white/5 text-purple-100'
+                }`;
+                card.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        <span class="font-black text-lg ${idx === 0 ? 'text-amber-300' : 'text-purple-300'}">#${idx + 1}</span>
+                        <div>
+                            <span class="font-bold text-base block">${esc(p.name)} ${p.id === localPlayer.id ? '(나)' : ''}</span>
+                            <span class="text-xs text-emerald-300 font-semibold">${LEVEL_NAMES[p.level || 1]}</span>
+                        </div>
+                    </div>
+                    <span class="font-mono font-black text-xl text-amber-300">${p.score} 점</span>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function returnToLobby() {
+            audio.playPop();
+            location.reload();
+        }
+
+        // ===== 음성 읽어주기(TTS) / 음성 입력(STT) / 화면 꺼짐 방지 =====
+        const JAMO_NAME = { 'ㄱ':'기역','ㄲ':'쌍기역','ㄴ':'니은','ㄷ':'디귿','ㄸ':'쌍디귿','ㄹ':'리을','ㅁ':'미음','ㅂ':'비읍','ㅃ':'쌍비읍','ㅅ':'시옷','ㅆ':'쌍시옷','ㅇ':'이응','ㅈ':'지읒','ㅉ':'쌍지읒','ㅊ':'치읓','ㅋ':'키읔','ㅌ':'티읕','ㅍ':'피읖','ㅎ':'히읗' };
+        let ttsOn = true, ttsUnlocked = false, lastQKey = '', lastHintSpoken = false;
+        const readChosung = (c) => c.split('').map(x => JAMO_NAME[x] || x).join(', ');
+
+        let ttsVoice = null, ttsWarned = false, ttsBusy = false, lastTtsEnd = 0;
+        function pickVoice() {
+            if (!('speechSynthesis' in window)) return;
+            ttsVoice = speechSynthesis.getVoices().find(v => v.lang && v.lang.replace('_', '-').toLowerCase().startsWith('ko')) || null;
+        }
+        if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
+        function speak(text) {
+            if (!ttsOn) return;
+            if (!('speechSynthesis' in window)) { showFeedback('이 브라우저는 읽어주기를 지원하지 않아요', false); return; }
+            const go = () => {
+                const u = new SpeechSynthesisUtterance(text);
+                u.lang = 'ko-KR'; u.rate = 0.85; u.pitch = 1.15; u.volume = 1;
+                if (!ttsVoice) pickVoice();
+                if (ttsVoice) u.voice = ttsVoice;
+                let started = false, failed = false;
+                u.onstart = () => { started = true; ttsBusy = true; };
+                u.onend = () => { ttsBusy = false; lastTtsEnd = Date.now(); };
+                u.onerror = (e) => {
+                    failed = true; ttsBusy = false; lastTtsEnd = Date.now();
+                    if (e.error !== 'canceled' && e.error !== 'interrupted') showFeedback('읽어주기 오류: ' + e.error, false);
+                };
+                window._ttsUtterance = u; // 브라우저가 중간에 삭제하지 않도록 참조 유지
+                speechSynthesis.resume();
+                speechSynthesis.speak(u);
+                setTimeout(() => {
+                    if (!started && !failed) {
+                        const n = speechSynthesis.getVoices().length;
+                        showFeedback(`읽기가 시작되지 않았어요 (설치된 음성 ${n}개, 한국어 음성 ${ttsVoice ? '있음' : '없음'})`, false);
+                    }
+                }, 2000);
+            };
+            try {
+                // 크롬은 cancel() 직후 바로 speak()하면 무시되는 경우가 있어 잠깐 기다림
+                if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); setTimeout(go, 150); }
+                else go();
+            } catch (e) { showFeedback('읽어주기 오류: ' + e.message, false); }
+        }
+        function unlockTTS() { // 모바일은 첫 터치 후에야 소리 허용
+            if (ttsUnlocked || !('speechSynthesis' in window)) return;
+            ttsUnlocked = true;
+            try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}
+        }
+        function toggleTTS() {
+            ttsOn = !ttsOn;
+            if (!ttsOn && 'speechSynthesis' in window) speechSynthesis.cancel();
+            document.getElementById('tts-icon').className = 'fa-solid ' + (ttsOn ? 'fa-comment-dots' : 'fa-comment-slash') + ' text-base';
+        }
+        function speakCurrent() {
+            if (!gameState.currentChosungObj) return;
+            let t = readChosung(gameState.currentChosungObj.chosung);
+            if (gameState.hintUsed) t += `. 첫 글자는 ${(gameState.currentChosungObj.words[0] || '').charAt(0)}`;
+            speak(t);
+        }
+
+        const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recog = null, micConsent = false, micWanted = false, voicePending = null;
+        window.addEventListener('load', () => { if (SRClass) document.getElementById('btn-mic').classList.remove('hidden'); });
+        function setMic(on) {
+            const b = document.getElementById('btn-mic');
+            b.classList.toggle('animate-pulse', on);
+            b.classList.toggle('bg-rose-500', on);
+            b.classList.toggle('bg-sky-600', !on);
+        }
+        function handleSpeech(alts) {
+            if (ttsBusy || Date.now() - lastTtsEnd < 800) return; // 읽어주는 소리는 무시
+            const cur = gameState.players[gameState.turnIndex];
+            if (!gameState.currentChosungObj || !cur || cur.id !== localPlayer.id) return; // 내 차례가 아니면 무시
+            const target = gameState.currentChosungObj.chosung;
+            // 확인/취소 음성 명령: 직전에 들린 답이 있을 때만 동작 (명령어 자체는 답안으로 쓰지 않음)
+            const CONFIRM = ['맞아', '맞아요', '응', '네', '예', '그래', '그래요', '좋아', '오케이'];
+            const CANCEL = ['아니', '아니야', '아니요', '아니에요', '취소', '다시'];
+            const pend = (voicePending && voicePending.key === lastQKey) ? voicePending.word : null;
+            if (alts.some(w => w.includes('제출') || CONFIRM.includes(w))) {
+                if (pend) {
+                    voicePending = null;
+                    document.getElementById('word-input').value = pend;
+                    submitWord({ preventDefault() {} });
+                }
+                return;
+            }
+            if (alts.some(w => CANCEL.includes(w))) {
+                if (pend) {
+                    voicePending = null;
+                    document.getElementById('word-input').value = '';
+                    showFeedback('좋아요, 다시 말해보세요!', true);
+                }
+                return;
+            }
+            const ok = alts.find(w => extractChosung(w) === target && (ALL_WORDS[target] || []).includes(w));
+            const pick = ok || alts.find(w => extractChosung(w) === target) || alts[0] || '';
+            if (!pick) return;
+            document.getElementById('word-input').value = pick;
+            if (ok) {
+                voicePending = null;
+                submitWord({ preventDefault() {} });
+            } else {
+                voicePending = { word: pick, key: lastQKey };
+                showFeedback(`"${pick}" 라고 들렸어요. 맞으면 "제출"이라고 말하세요. 아니면 다시 말해보세요!`, false);
+                speak(`${pick}. 맞으면 제출이라고 말하세요`);
+            }
+        }
+        function buildRecog() {
+            const r = new SRClass();
+            r.lang = 'ko-KR'; r.interimResults = false; r.maxAlternatives = 5; r.continuous = true;
+            r.onstart = () => setMic(true);
+            r.onresult = (e) => {
+                const res = e.results[e.results.length - 1];
+                handleSpeech(Array.from(res).map(a => a.transcript.replace(/[^가-힣]/g, '')));
+            };
+            r.onerror = (e) => {
+                if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+                    micWanted = false;
+                    showFeedback('마이크 권한이 필요해요. 주소창 왼쪽 아이콘 → 사이트 설정 → 마이크 → 허용', false);
+                } else if (e.error === 'audio-capture') {
+                    micWanted = false;
+                    showFeedback('마이크를 찾을 수 없어요', false);
+                }
+                // no-speech 등은 조용히 다시 듣기
+            };
+            r.onend = () => {
+                if (micWanted) setTimeout(() => { try { r.start(); } catch (e) { micWanted = false; setMic(false); } }, 300);
+                else setMic(false);
+            };
+            return r;
+        }
+        function toggleMic() {
+            if (!SRClass) return;
+            if (micWanted) { micWanted = false; try { recog.stop(); } catch (e) {} setMic(false); return; }
+            if (!micConsent) {
+                if (!confirm('음성 인식은 사용 중인 기기/브라우저 회사의 서버로 목소리가 전송될 수 있어요. 사용할까요?')) return;
+                micConsent = true;
+            }
+            micWanted = true;
+            if (!recog) recog = buildRecog();
+            try { recog.start(); showFeedback('🎤 마이크가 켜졌어요! 내 차례에 말해보세요', true); } catch (e) {}
+        }
+
+        let wakeLock = null;
+        async function requestWake() {
+            try {
+                if ('wakeLock' in navigator && !wakeLock) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    wakeLock.addEventListener('release', () => { wakeLock = null; });
+                }
+            } catch (e) {}
+        }
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') requestWake(); });
+
+        function toggleBGM() {
+            audio.init();
+            const on = audio.toggleBGM();
+            document.getElementById('bgm-icon').className = 'fa-solid ' + (on ? 'fa-music' : 'fa-volume-xmark') + ' text-base';
+        }
+
+        function switchView(viewId) {
+            ['view-lobby', 'view-room', 'view-game', 'view-result'].forEach(id => {
+                document.getElementById(id).style.display = (id === viewId) ? 'flex' : 'none';
+            });
+        }
+
+        function toggleModal(modalId) {
+            const modal = document.getElementById(modalId);
+            modal.classList.toggle('hidden');
+        }
+    </script>
+</body>
+</html>
